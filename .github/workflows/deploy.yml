@@ -50,3 +50,32 @@ jobs:
           # here is where you'd call Helm / kubectl in a real workflow
           # for now we just echo
           echo "Pretending to roll out ${CURRENT_VERSION} to our 'cluster'"
+
+      - name: Write newly deployed version to file
+        run: |
+          CURRENT_VERSION="${{ inputs.release_tag }}"
+          echo "${CURRENT_VERSION}" > "${DEPLOYED_VERSION_FILE}"
+          echo "Wrote deployed version '${CURRENT_VERSION}' to ${DEPLOYED_VERSION_FILE}"
+
+      - name: Commit and push deployment state
+        run: |
+          # Only commit if there are changes (e.g. version actually changed or first run)
+          if [ -n "$(git status --porcelain)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add "${DEPLOYED_VERSION_FILE}"
+            git commit -m "Fake deploy: set deployed version to ${{ inputs.release_tag }}"
+            git push
+            echo "Pushed updated deployed version to repository."
+          else
+            echo "No changes to commit."
+          fi
+
+      - name: Show final state (for debugging)
+        run: |
+          echo "===== Deployment state file ====="
+          cat "${DEPLOYED_VERSION_FILE}"
+          echo "================================="
+          echo "Previous version: ${{ steps.previous.outputs.previous_version }}"
+          echo "Current version : ${{ inputs.release_tag }}"
