@@ -275,33 +275,63 @@ jobs:
             core.info('Lead time (first commit → deploy) stats: ' +
               `p50=${firstStats.p50}, avg=${firstStats.avg}, p90=${firstStats.p90}`);
       - name: DORA metrics summary
-        run: |
-          echo "## DORA Metrics Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+        uses: actions/github-script@v7
+        env:
+          ROLLBACK: ${{ steps.dora_metrics.outputs.rollback }}
+          PRS_JSON: ${{ steps.dora_metrics.outputs.prs_json }}
+          MERGE_P50: ${{ steps.dora_metrics.outputs.merge_lead_time_p50 }}
+          MERGE_AVG: ${{ steps.dora_metrics.outputs.merge_lead_time_avg }}
+          MERGE_P90: ${{ steps.dora_metrics.outputs.merge_lead_time_p90 }}
+          FIRST_P50: ${{ steps.dora_metrics.outputs.first_commit_lead_time_p50 }}
+          FIRST_AVG: ${{ steps.dora_metrics.outputs.first_commit_lead_time_avg }}
+          FIRST_P90: ${{ steps.dora_metrics.outputs.first_commit_lead_time_p90 }}
+        with:
+          script: |
+            const fs = require('fs');
+            const summaryPath = process.env.GITHUB_STEP_SUMMARY;
 
-          echo "**Rollback:** \`${{ steps.dora_metrics.outputs.rollback }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            const rollback = process.env.ROLLBACK || 'false';
+            const prsJson = process.env.PRS_JSON || '[]';
 
-          echo "### Aggregate lead times (seconds)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Type | p50 | avg | p90 |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|------|-----|-----|-----|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Merge → Deploy | ${{ steps.dora_metrics.outputs.merge_lead_time_p50 }} | ${{ steps.dora_metrics.outputs.merge_lead_time_avg }} | ${{ steps.dora_metrics.outputs.merge_lead_time_p90 }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| First Commit → Deploy | ${{ steps.dora_metrics.outputs.first_commit_lead_time_p50 }} | ${{ steps.dora_metrics.outputs.first_commit_lead_time_avg }} | ${{ steps.dora_metrics.outputs.first_commit_lead_time_p90 }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            const mergeP50 = process.env.MERGE_P50 || '';
+            const mergeAvg = process.env.MERGE_AVG || '';
+            const mergeP90 = process.env.MERGE_P90 || '';
 
-          echo "### Per-PR lead times" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            const firstP50 = process.env.FIRST_P50 || '';
+            const firstAvg = process.env.FIRST_AVG || '';
+            const firstP90 = process.env.FIRST_P90 || '';
 
-          PRS_JSON='${{ steps.dora_metrics.outputs.prs_json }}'
-          echo "$PRS_JSON" | jq -r '
-            (["PR", "Title", "Merge→Deploy (s)", "FirstCommit→Deploy (s)"] | @tsv),
-            (.[] | [("#" + (.number|tostring)), .title, (.merge_lead_time_seconds|tostring), (if .first_commit_lead_time_seconds == null then "" else (.first_commit_lead_time_seconds|tostring) end)] | @tsv)
-          ' | tr '\t' '|' | while IFS= read -r line; do
-            if [[ "$line" == PR* ]]; then
-              echo "| $line |" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "| $line |" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
-        shell: bash
+            let prs = [];
+            try {
+              prs = JSON.parse(prsJson);
+            } catch (e) {
+              core.warning(`Failed to parse PRS_JSON: ${e.message}`);
+            }
+
+            let md = '';
+
+            md += `## DORA Metrics Summary\n\n`;
+            md += `**Rollback:** \`${rollback}\`\n\n`;
+
+            md += `### Aggregate lead times (seconds)\n\n`;
+            md += `| Type | p50 | avg | p90 |\n`;
+            md += `|------|-----|-----|-----|\n`;
+            md += `| Merge → Deploy | ${mergeP50} | ${mergeAvg} | ${mergeP90} |\n`;
+            md += `| First Commit → Deploy | ${firstP50} | ${firstAvg} | ${firstP90} |\n\n`;
+
+            md += `### Per-PR lead times\n\n`;
+            if (!prs.length) {
+              md += `_No PRs found for this deployment range._\n`;
+            } else {
+              md += `| PR | Title | Merge→Deploy (s) | FirstCommit→Deploy (s) |\n`;
+              md += `|----|-------|------------------|------------------------|\n`;
+              for (const pr of prs) {
+                const num = pr.number;
+                const title = (pr.title || '').replace(/\|/g, '\\|');
+                const mergeLead = pr.merge_lead_time_seconds ?? '';
+                const firstLead = pr.first_commit_lead_time_seconds ?? '';
+                md += `| #${num} | ${title} | ${mergeLead} | ${firstLead} |\n`;
+              }
+            }
+
+            fs.appendFileSync(summaryPath, md);
