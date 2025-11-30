@@ -1,0 +1,52 @@
+name: Fake Deploy (POC)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Version / tag to deploy (e.g. v1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  DEPLOYED_VERSION_FILE: .deployment/deployed_version.txt
+
+jobs:
+  fake-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v46
+        with:
+          fetch-depth: 0
+
+      - name: Ensure deployment state directory exists
+        run: |
+          mkdir -p "$(dirname "${DEPLOYED_VERSION_FILE}")"
+
+      - name: Read previously deployed version
+        id: previous
+        run: |
+          if [ -f "${DEPLOYED_VERSION_FILE}" ]; then
+            PREV_VERSION=$(cat "${DEPLOYED_VERSION_FILE}")
+            echo "Previously deployed version: ${PREV_VERSION}"
+          else
+            PREV_VERSION=""
+            echo "No previously deployed version found (first deploy)."
+          fi
+
+          echo "previous_version=${PREV_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Fake deploy
+        run: |
+          CURRENT_VERSION="${{ inputs.release_tag }}"
+          echo "🚀 Fake deploying version: ${CURRENT_VERSION}"
+          echo "ℹ️ Previous version was: ${{ steps.previous.outputs.previous_version }}"
+
+          # here is where you'd call Helm / kubectl in a real workflow
+          # for now we just echo
+          echo "Pretending to roll out ${CURRENT_VERSION} to our 'cluster'..._
