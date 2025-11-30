@@ -85,6 +85,8 @@ jobs:
       - name: Calculate DORA-style metrics (deploy + rollback + lead time)
         uses: actions/github-script@v7
         env:
+          SERVICE_NAME: ${{ env.SERVICE_NAME }}
+          ENVIRONMENT: ${{ inputs.environment }}
           CURRENT_TAG: ${{ inputs.release_tag }}
           PREVIOUS_TAG: ${{ steps.previous-version.outputs.previous_release_tag }}
         with:
@@ -94,31 +96,29 @@ jobs:
             const currentTag = process.env.CURRENT_TAG;
             const previousTag = process.env.PREVIOUS_TAG;
 
-            const { context, github, core } = require('@actions/github');
-
             core.info(`Service: ${service}`);
             core.info(`Environment: ${envName}`);
             core.info(`Current tag: ${currentTag}`);
             core.info(`Previous tag: ${previousTag || '<none>'}`);
 
-            // --- Helper: simple semver parser/compare (no external deps) ---
+            // --- Simple semver comparison helpers ---
             function parseSemver(tag) {
               if (!tag) return null;
               const clean = tag.replace(/^v/, '');
               const parts = clean.split('.');
-              if (parts.length < 1) return null;
-              const [maj, min, pat] = parts;
+              if (parts.length < 3) return null;
               return {
-                major: Number(maj) || 0,
-                minor: Number(min) || 0,
-                patch: Number(pat) || 0,
+                major: Number(parts[0]),
+                minor: Number(parts[1]),
+                patch: Number(parts[2]),
               };
             }
 
             function isRollback(current, previous) {
               const c = parseSemver(current);
               const p = parseSemver(previous);
-              if (!c || !p) return false; // if semver is dodgy, just don't mark rollback
+              if (!c || !p) return false;
+
               if (c.major !== p.major) return c.major < p.major;
               if (c.minor !== p.minor) return c.minor < p.minor;
               return c.patch < p.patch;
@@ -126,48 +126,55 @@ jobs:
 
             const rollback = previousTag ? isRollback(currentTag, previousTag) : false;
 
-            // --- Emit deployment metric as log (POC) ---
+            // ------------------
+            // Deployment Metric
+            // ------------------
             core.info('--- Deployment metric (POC) ---');
             core.info(
               `METRIC deployment_total{service="${service}",env="${envName}",from="${previousTag || ''}",to="${currentTag}",rollback="${rollback}"} 1`
             );
 
             if (!previousTag) {
-              core.info('No previous tag; skipping lead-time and diff-based metrics.');
+              core.info('No previous tag; skipping lead-time calculation.');
               return;
             }
 
+            // ---------------------------------------
+            // Compare commits between tags
+            // ---------------------------------------
             const owner = context.repo.owner;
             const repo = context.repo.repo;
 
-            // --- Compare commits between previousTag...currentTag ---
             core.info(`Fetching commits between ${previousTag}...${currentTag}`);
+
             const compare = await github.rest.repos.compareCommitsWithBasehead({
               owner,
               repo,
               basehead: `${previousTag}...${currentTag}`,
             });
 
-            const commits = compare.data.commits || [];
-            core.info(`Found ${commits.length} commits in this release range.`);
+            const commits = compare.data.commits ?? [];
+            core.info(`Found ${commits.length} commits in diff.`);
 
-            const deployTime = new Date(); // deployment time = now
+            const deployTime = new Date();
             const leadTimes = [];
             const seenPrs = new Set();
 
+            // ---------------------------------------
+            // Map commits → PR → merged_at → lead time
+            // ---------------------------------------
             for (const commit of commits) {
               const sha = commit.sha;
-              core.debug(`Looking up PRs for commit ${sha}`);
 
-              const prsForCommit = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+              const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner,
                 repo,
                 commit_sha: sha,
               });
 
-              for (const pr of prsForCommit.data) {
-                if (!pr.merged_at) continue; // ignore PRs not merged
-                if (seenPrs.has(pr.number)) continue; // avoid double-counting PRs
+              for (const pr of prs.data) {
+                if (!pr.merged_at) continue;
+                if (seenPrs.has(pr.number)) continue;
 
                 seenPrs.add(pr.number);
 
@@ -175,13 +182,11 @@ jobs:
                 const leadTimeSeconds = Math.round(
                   (deployTime.getTime() - mergedAt.getTime()) / 1000
                 );
+
                 leadTimes.push(leadTimeSeconds);
 
-                core.info(
-                  `PR #${pr.number} merged_at=${pr.merged_at} -> lead_time_seconds=${leadTimeSeconds}`
-                );
+                core.info(`PR #${pr.number} merged_at=${pr.merged_at} → lead_time=${leadTimeSeconds}s`);
 
-                // Per-PR metric (POC)
                 core.info(
                   `METRIC deployment_lead_time_seconds{service="${service}",env="${envName}",pr="${pr.number}"} ${leadTimeSeconds}`
                 );
@@ -189,20 +194,21 @@ jobs:
             }
 
             if (leadTimes.length === 0) {
-              core.info('No PRs with merged_at found for this release range; no lead-time metrics.');
+              core.info('No PRs found with merged_at timestamps; no lead time metrics.');
               return;
             }
 
-            // --- Aggregate lead times: p50, p90, max ---
+            // -------------------------------
+            // Aggregate lead time stats
+            // -------------------------------
             leadTimes.sort((a, b) => a - b);
-            const idxP50 = Math.floor(0.5 * (leadTimes.length - 1));
-            const idxP90 = Math.floor(0.9 * (leadTimes.length - 1));
-            const p50 = leadTimes[idxP50];
-            const p90 = leadTimes[idxP90];
+
+            const p50 = leadTimes[Math.floor(0.5 * (leadTimes.length - 1))];
+            const p90 = leadTimes[Math.floor(0.9 * (leadTimes.length - 1))];
             const max = leadTimes[leadTimes.length - 1];
 
-            core.info('--- Lead time summary (seconds) ---');
-            core.info(`p50 = ${p50}, p90 = ${p90}, max = ${max}`);
+            core.info('--- Lead Time Summary ---');
+            core.info(`p50=${p50}, p90=${p90}, max=${max}`);
 
             core.info(
               `METRIC deployment_lead_time_summary_seconds{service="${service}",env="${envName}",stat="p50"} ${p50}`
