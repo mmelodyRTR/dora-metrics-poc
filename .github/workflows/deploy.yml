@@ -49,4 +49,4 @@ jobs:
 
           # here is where you'd call Helm / kubectl in a real workflow
           # for now we just echo
-          echo "Pretending to roll out ${CURRENT_VERSION} to our 'cluster'..._
+          echo "Pretending to roll out ${CURRENT_VERSION} to our 'cluster'"
