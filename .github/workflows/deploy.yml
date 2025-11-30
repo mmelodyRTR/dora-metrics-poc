@@ -103,7 +103,7 @@ jobs:
           SERVICE_NAME: ${{ env.SERVICE_NAME }}
           ENVIRONMENT: ${{ inputs.environment }}
           CURRENT_TAG: ${{ inputs.release_tag }}
-          PREVIOUS_TAG: ${{ steps.previous_version.outputs.previous_release_tag }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.previous_version }}
         with:
           script: |
             const service = process.env.SERVICE_NAME;
