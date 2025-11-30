@@ -103,205 +103,185 @@ jobs:
           ENVIRONMENT: ${{ inputs.environment }}
           CURRENT_TAG: ${{ inputs.release_tag }}
           PREVIOUS_TAG: ${{ steps.previous.outputs.previous_version }}
-          with:
-            script: |
-              const service = process.env.SERVICE_NAME;
-              const envName = process.env.ENVIRONMENT;
-              const currentTag = process.env.CURRENT_TAG;
-              const previousTag = process.env.PREVIOUS_TAG;
-  
-              core.info(`Service: ${service}`);
-              core.info(`Environment: ${envName}`);
-              core.info(`Current tag: ${currentTag}`);
-              core.info(`Previous tag: ${previousTag || '<none>'}`);
-  
-              // --- Simple semver comparison helpers ---
-              function parseSemver(tag) {
-                if (!tag) return null;
-                const clean = tag.replace(/^v/, '');
-                const parts = clean.split('.');
-                if (parts.length < 3) return null;
-                return {
-                  major: Number(parts[0]),
-                  minor: Number(parts[1]),
-                  patch: Number(parts[2]),
-                };
-              }
-  
-              function isRollback(current, previous) {
-                const c = parseSemver(current);
-                const p = parseSemver(previous);
-                if (!c || !p) return false;
-                if (c.major !== p.major) return c.major < p.major;
-                if (c.minor !== p.minor) return c.minor < p.minor;
-                return c.patch < p.patch;
-              }
-  
-              const rollback = previousTag ? isRollback(currentTag, previousTag) : false;
-              core.setOutput('rollback', rollback ? 'true' : 'false');
-  
-              // ------------------
-              // Deployment Metric (log only)
-              // ------------------
-              core.info('--- Deployment metric (POC) ---');
-              core.info(
-                `METRIC deployment_total{service="${service}",env="${envName}",from="${previousTag || ''}",to="${currentTag}",rollback="${rollback}"} 1`
-              );
-  
-              if (!previousTag) {
-                core.info('No previous tag; skipping lead-time calculation.');
-                core.setOutput('prs_json', '[]');
-                core.setOutput('merge_lead_time_p50', '');
-                core.setOutput('merge_lead_time_avg', '');
-                core.setOutput('merge_lead_time_p90', '');
-                core.setOutput('first_commit_lead_time_p50', '');
-                core.setOutput('first_commit_lead_time_avg', '');
-                core.setOutput('first_commit_lead_time_p90', '');
-                return;
-              }
-  
-              const owner = context.repo.owner;
-              const repo = context.repo.repo;
-  
-              const prevRef = previousTag;
-              const currRef = currentTag;
-  
-              core.info(`Fetching commits between ${prevRef}...${currRef}`);
-  
-              const compare = await github.rest.repos.compareCommitsWithBasehead({
+        with:
+          script: |
+            const service = process.env.SERVICE_NAME;
+            const envName = process.env.ENVIRONMENT;
+            const currentTag = process.env.CURRENT_TAG;
+            const previousTag = process.env.PREVIOUS_TAG;
+
+            core.info(`Service: ${service}`);
+            core.info(`Environment: ${envName}`);
+            core.info(`Current tag: ${currentTag}`);
+            core.info(`Previous tag: ${previousTag || '<none>'}`);
+
+            // --- Simple semver comparison helpers ---
+            function parseSemver(tag) {
+              if (!tag) return null;
+              const clean = tag.replace(/^v/, '');
+              const parts = clean.split('.');
+              if (parts.length < 3) return null;
+              return {
+                major: Number(parts[0]),
+                minor: Number(parts[1]),
+                patch: Number(parts[2]),
+              };
+            }
+
+            function isRollback(current, previous) {
+              const c = parseSemver(current);
+              const p = parseSemver(previous);
+              if (!c || !p) return false;
+              if (c.major !== p.major) return c.major < p.major;
+              if (c.minor !== p.minor) return c.minor < p.minor;
+              return c.patch < p.patch;
+            }
+
+            const rollback = previousTag ? isRollback(currentTag, previousTag) : false;
+
+            // ------------------
+            // Deployment Metric
+            // ------------------
+            core.info('--- Deployment metric (POC) ---');
+            core.info(
+              `METRIC deployment_total{service="${service}",env="${envName}",from="${previousTag || ''}",to="${currentTag}",rollback="${rollback}"} 1`
+            );
+
+            if (!previousTag) {
+              core.info('No previous tag; skipping lead-time calculation.');
+              return;
+            }
+
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const prevRef = previousTag;
+            const currRef = currentTag;
+
+            core.info(`Fetching commits between ${prevRef}...${currRef}`);
+
+            const compare = await github.rest.repos.compareCommitsWithBasehead({
+              owner,
+              repo,
+              basehead: `${prevRef}...${currRef}`,
+            });
+
+            const commits = compare.data.commits ?? [];
+            core.info(`Found ${commits.length} commits in diff.`);
+
+            const deployTime = new Date();
+            const leadTimesMerge = [];
+            const leadTimesFirstCommit = [];
+            const seenPrs = new Set();
+
+            for (const commit of commits) {
+              const sha = commit.sha;
+
+              const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
                 owner,
                 repo,
-                basehead: `${prevRef}...${currRef}`,
+                commit_sha: sha,
               });
-  
-              const commits = compare.data.commits ?? [];
-              core.info(`Found ${commits.length} commits in diff.`);
-  
-              const deployTime = new Date();
-              const mergeTimes = [];
-              const firstCommitTimes = [];
-              const prMetrics = [];
-              const seenPrs = new Set();
-  
-              for (const commit of commits) {
-                const sha = commit.sha;
-  
-                const prs = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+
+              for (const pr of prs.data) {
+                if (!pr.merged_at) continue;
+                if (seenPrs.has(pr.number)) continue;
+                seenPrs.add(pr.number);
+
+                const mergedAt = new Date(pr.merged_at);
+                const leadTimeMergeSeconds = Math.round(
+                  (deployTime.getTime() - mergedAt.getTime()) / 1000
+                );
+                leadTimesMerge.push(leadTimeMergeSeconds);
+
+                // 🔍 NEW: first-commit-in-PR → deploy lead time
+                const prCommits = await github.rest.pulls.listCommits({
                   owner,
                   repo,
-                  commit_sha: sha,
+                  pull_number: pr.number,
+                  per_page: 100,
                 });
-  
-                for (const pr of prs.data) {
-                  if (!pr.merged_at) continue;
-                  if (seenPrs.has(pr.number)) continue;
-                  seenPrs.add(pr.number);
-  
-                  const mergedAt = new Date(pr.merged_at);
-                  const mergeLeadSeconds = Math.round(
-                    (deployTime.getTime() - mergedAt.getTime()) / 1000
+
+                let earliestCommitTime = null;
+                for (const c of prCommits.data) {
+                  const authorDate = c.commit?.author?.date;
+                  const committerDate = c.commit?.committer?.date;
+                  const candidate = authorDate || committerDate;
+                  if (!candidate) continue;
+
+                  const t = new Date(candidate);
+                  if (!earliestCommitTime || t < earliestCommitTime) {
+                    earliestCommitTime = t;
+                  }
+                }
+
+                let leadTimeFirstCommitSeconds = null;
+                if (earliestCommitTime) {
+                  leadTimeFirstCommitSeconds = Math.round(
+                    (deployTime.getTime() - earliestCommitTime.getTime()) / 1000
                   );
-                  mergeTimes.push(mergeLeadSeconds);
-  
-                  // First-commit-in-PR → deploy
-                  const prCommits = await github.rest.pulls.listCommits({
-                    owner,
-                    repo,
-                    pull_number: pr.number,
-                    per_page: 100,
-                  });
-  
-                  let earliestCommitTime = null;
-                  for (const c of prCommits.data) {
-                    const authorDate = c.commit?.author?.date;
-                    const committerDate = c.commit?.committer?.date;
-                    const candidate = authorDate || committerDate;
-                    if (!candidate) continue;
-                    const t = new Date(candidate);
-                    if (!earliestCommitTime || t < earliestCommitTime) {
-                      earliestCommitTime = t;
-                    }
-                  }
-  
-                  let firstCommitLeadSeconds = null;
-                  if (earliestCommitTime) {
-                    firstCommitLeadSeconds = Math.round(
-                      (deployTime.getTime() - earliestCommitTime.getTime()) / 1000
-                    );
-                    firstCommitTimes.push(firstCommitLeadSeconds);
-                  }
-  
-                  prMetrics.push({
-                    number: pr.number,
-                    title: pr.title,
-                    merge_lead_time_seconds: mergeLeadSeconds,
-                    first_commit_lead_time_seconds: firstCommitLeadSeconds,
-                  });
-  
+                  leadTimesFirstCommit.push(leadTimeFirstCommitSeconds);
+                }
+
+                core.info(
+                  `PR #${pr.number}: merged_at=${pr.merged_at} ` +
+                  `→ merge_lead_time=${leadTimeMergeSeconds}s` +
+                  (leadTimeFirstCommitSeconds != null
+                    ? `, first_commit_lead_time=${leadTimeFirstCommitSeconds}s`
+                    : '')
+                );
+
+                // Per-PR metrics
+                core.info(
+                  `METRIC deployment_lead_time_seconds{service="${service}",env="${envName}",pr="${pr.number}",type="merge_to_deploy"} ${leadTimeMergeSeconds}`
+                );
+                if (leadTimeFirstCommitSeconds != null) {
                   core.info(
-                    `PR #${pr.number}: merge_lead=${mergeLeadSeconds}s` +
-                    (firstCommitLeadSeconds != null
-                      ? `, first_commit_lead=${firstCommitLeadSeconds}s`
-                      : '')
+                    `METRIC deployment_lead_time_seconds{service="${service}",env="${envName}",pr="${pr.number}",type="first_commit_to_deploy"} ${leadTimeFirstCommitSeconds}`
                   );
                 }
               }
-  
-              core.setOutput('prs_json', JSON.stringify(prMetrics));
-  
-              function stats(arr) {
-                if (!arr.length) return { p50: null, p90: null, avg: null };
-                const sorted = [...arr].sort((a, b) => a - b);
-                const p50 = sorted[Math.floor(0.5 * (sorted.length - 1))];
-                const p90 = sorted[Math.floor(0.9 * (sorted.length - 1))];
-                const avg = Math.round(sorted.reduce((a, b) => a + b, 0) / sorted.length);
-                return { p50, p90, avg };
-              }
-  
-              const mergeStats = stats(mergeTimes);
-              const firstStats = stats(firstCommitTimes);
-  
-              // Set outputs for summary
-              core.setOutput('merge_lead_time_p50', mergeStats.p50 ?? '');
-              core.setOutput('merge_lead_time_avg', mergeStats.avg ?? '');
-              core.setOutput('merge_lead_time_p90', mergeStats.p90 ?? '');
-              core.setOutput('first_commit_lead_time_p50', firstStats.p50 ?? '');
-              core.setOutput('first_commit_lead_time_avg', firstStats.avg ?? '');
-              core.setOutput('first_commit_lead_time_p90', firstStats.p90 ?? '');
-  
-              core.info('Lead time (merge → deploy) stats: ' +
-                `p50=${mergeStats.p50}, avg=${mergeStats.avg}, p90=${mergeStats.p90}`);
-              core.info('Lead time (first commit → deploy) stats: ' +
-                `p50=${firstStats.p50}, avg=${firstStats.avg}, p90=${firstStats.p90}`);
-      - name: DORA metrics summary
-        run: |
-          echo "## DORA Metrics Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            }
 
-          echo "**Rollback:** \`${{ steps.dora_metrics.outputs.rollback }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            if (leadTimesMerge.length === 0) {
+              core.info('No PRs with merged_at timestamps; no lead time metrics.');
+              return;
+            }
 
-          echo "### Aggregate lead times (seconds)" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Type | p50 | avg | p90 |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|------|-----|-----|-----|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Merge → Deploy | ${{ steps.dora_metrics.outputs.merge_lead_time_p50 }} | ${{ steps.dora_metrics.outputs.merge_lead_time_avg }} | ${{ steps.dora_metrics.outputs.merge_lead_time_p90 }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "| First Commit → Deploy | ${{ steps.dora_metrics.outputs.first_commit_lead_time_p50 }} | ${{ steps.dora_metrics.outputs.first_commit_lead_time_avg }} | ${{ steps.dora_metrics.outputs.first_commit_lead_time_p90 }} |" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            function summaryStats(arr) {
+              arr.sort((a, b) => a - b);
+              const p50 = arr[Math.floor(0.5 * (arr.length - 1))];
+              const p90 = arr[Math.floor(0.9 * (arr.length - 1))];
+              const max = arr[arr.length - 1];
+              return { p50, p90, max };
+            }
 
-          echo "### Per-PR lead times" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+            const mergeStats = summaryStats(leadTimesMerge);
+            core.info('--- Lead time (PR merge → deploy) summary ---');
+            core.info(`p50=${mergeStats.p50}, p90=${mergeStats.p90}, max=${mergeStats.max}`);
+            core.info(
+              `METRIC deployment_lead_time_summary_seconds{service="${service}",env="${envName}",type="merge_to_deploy",stat="p50"} ${mergeStats.p50}`
+            );
+            core.info(
+              `METRIC deployment_lead_time_summary_seconds{service="${service}",env="${envName}",type="merge_to_deploy",stat="p90"} ${mergeStats.p90}`
+            );
+            core.info(
+              `METRIC deployment_lead_time_summary_seconds{service="${service}",env="${envName}",type="merge_to_deploy",stat="max"} ${mergeStats.max}`
+            );
 
-          PRS_JSON='${{ steps.dora_metrics.outputs.prs_json }}'
-          echo "$PRS_JSON" | jq -r '
-            (["PR", "Title", "Merge→Deploy (s)", "FirstCommit→Deploy (s)"] | @tsv),
-            (.[] | [("#" + (.number|tostring)), .title, (.merge_lead_time_seconds|tostring), (if .first_commit_lead_time_seconds == null then "" else (.first_commit_lead_time_seconds|tostring) end)] | @tsv)
-          ' | tr '\t' '|' | while IFS= read -r line; do
-            if [[ "$line" == PR* ]]; then
-              echo "| $line |" >> "$GITHUB_STEP_SUMMARY"
-            else
-              echo "| $line |" >> "$GITHUB_STEP_SUMMARY"
-            fi
-          done
-        shell: bash
-
+            if (leadTimesFirstCommit.length > 0) {
+              const firstStats = summaryStats(leadTimesFirstCommit);
+              core.info('--- Lead time (first commit in PR → deploy) summary ---');
+              core.info(`p50=${firstStats.p50}, p90=${firstStats.p90}, max=${firstStats.max}`);
+              core.info(
+                `METRIC deployment_lead_time_summary_seconds{service="${service}",env="${envName}",type="first_commit_to_deploy",stat="p50"} ${firstStats.p50}`
+              );
+              core.info(
+                `METRIC deployment_lead_time_summary_seconds{service="${service}",env="${envName}",type="first_commit_to_deploy",stat="p90"} ${firstStats.p90}`
+              );
+              core.info(
+                `METRIC deployment_lead_time_summary_seconds{service="${service}",env="${envName}",type="first_commit_to_deploy",stat="max"} ${firstStats.max}`
+              );
+            } else {
+              core.info('No commit timestamps found for PRs to compute first-commit lead time.');
+            }
