@@ -1,0 +1,20 @@
+name: Release Please (POC)
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write       # required for tags + GitHub Releases + manifest updates
+  pull-requests: write  # required so Release Please can open/maintain release PRs
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          release-type: simple
