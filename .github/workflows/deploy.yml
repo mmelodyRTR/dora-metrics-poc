@@ -197,6 +197,15 @@ jobs:
                 if (!pr.merged_at) continue;
                 if (seenPrs.has(pr.number)) continue;
                 seenPrs.add(pr.number);
+                
+                const hasAutoreleaseTagged = (pr.labels || []).some(
+                  (label) => typeof label.name === 'string' && label.name === 'autorelease: tagged'
+                );
+              
+                if (hasAutoreleaseTagged) {
+                  core.info(`Skipping Release Please PR #${pr.number} (${pr.title}) due to 'autorelease: tagged' label`);
+                  continue;
+                }
 
                 const mergedAt = new Date(pr.merged_at);
                 const mergeLeadSeconds = Math.round(
